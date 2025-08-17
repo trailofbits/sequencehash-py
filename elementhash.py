@@ -174,7 +174,9 @@ class ElementMAC:
 
     def __finalize(self) -> None:
         item_bytes: bytes = encode_int_msbf(self.item_count)
-        self.hasher.update(item_bytes)
+        out_len_bytes: bytes = encode_int_msbf(self.digest_size)
+        self.finalizer.update(item_bytes)
+        self.finalizer.update(out_len_bytes)
         self.finalizer.update(self.hasher.digest())
         self.finished = True
         return
