@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 
-from typing import Any, Optional, Union
+from typing import Any, Optional
 
 import hashlib
 
 # Initialization string
 INITIALIZER_INNER: bytes = b'ELTHSH_I'
 INITIALIZER_OUTER: bytes = b'ELTHSH_O'
+
+# Standard function IDs
+FUNCTION_ID_MAC: int = 1
+FUNCTION_ID_HASH: int = 2
 
 # Max length of any given input (2 ** 128 - 1 bytes)
 MAX_LEN_BYTES: int = 16
@@ -66,7 +70,7 @@ def pad(data: bytes, b: int) -> bytes:
     return padded
 
 
-def derive_block(value: bytes, algo: str) -> bytes:
+def derive_block(value: bytes, algo: Any) -> bytes:
     """
     Processes a byte string according to the HMAC key derivation algorithm: if
     the byte string is shorter than or equal to the block length of the given
@@ -74,7 +78,7 @@ def derive_block(value: bytes, algo: str) -> bytes:
     longer than the block length, it is hashed with the given algorithm, and
     the result is zero-padded out to the block length of the hash algorithm.
     """
-    hsh = hashlib.new(algo)
+    hsh = algo()
     if len(value) > hsh.block_size:
         hsh.update(value)
         value = hsh.digest()
@@ -82,48 +86,76 @@ def derive_block(value: bytes, algo: str) -> bytes:
     return value
 
 
-def new(digestmod: str,
-        key: Optional[bytes]=None,
-        separator: Optional[bytes]=None) -> Union["ElementHash", "ElementMAC"]:
-    """
-    Returns a new `ElementHash` object with the underlying hash function given
-    by `digestmod`, optionally including the domain separation value
-    `separator`.
-
-    If a `key` value is specified, returns an `ElementMAC` object with the
-    underlying hash function and key, optionally including the domain
-    separation value `separator`.
-    """
-    if key is not None:
-        return ElementMAC(digestmod=digestmod, key=key, separator=separator)
-    return newHash(digestmod, separator=separator)
-
-
-def newHash(digestmod: str, separator: Optional[bytes]=None) -> "ElementHash":
-    return ElementHash(digestmod, sep=separator)
-
-
-def newMAC(digestmod: str, key: bytes, separator: Optional[bytes]=None)\
-    -> "ElementHash":
-    return ElementMAC(digestmod, key=key, sep=separator)
-
-
 class ElementMAC:
+    @staticmethod
+    def new(
+            key: bytes,
+            msg: Optional[Any]=None,
+            digestmod: Optional[str]=None,
+            separator: Optional[bytes]=None) -> "_ElementFunc":
+        return newMAC(key, msg, digestmod, separator)
+
+class ElementHash:
+    @staticmethod
+    def new(
+            digestmod: Optional[Any]=None,
+            data: Optional[bytes]=None,
+            separator: Optional[bytes]=None) -> "_ElementFunc":
+        return newHash(digestmod, data, separator)
+
+
+def newHash(
+        digestmod: Any,
+        data: Optional[bytes]=None,
+        separator: Optional[bytes]=None) -> "_ElementFunc":
     """
-    A hash-agnostic MAC algorithm that avoids ambiguous encoding issues.
+    Return a new ElementHash instance
     """
-    finished:       bool        # Tracks when the hash has been finalized
-    hasher:         Any         # "Internal" hash value
-    finalizer:      Any         # Provides the final hash value
-    item_count:     int         # Tracks the total number of items hashed
-    algo_name:      str         # hashlib selector
+    hsh = _ElementFunc(func_id=FUNCTION_ID_HASH,
+                       key=b'',
+                       digestmod=digestmod,
+                       separator=separator)
+    if data is not None:
+        hsh.update(data)
+    return hsh
+
+
+def newMAC(
+        key: bytes,
+        msg: Optional[bytes]=None,
+        digestmod: Optional[str]=None,
+        separator: Optional[bytes]=None) -> "_ElementFunc":
+    """
+    Return a new ElementMAC instance
+    """
+    mac = _ElementFunc(digestmod=digestmod,
+                       func_id=FUNCTION_ID_MAC,
+                       key=key,
+                       separator=separator)
+    if msg is not None:
+        mac.update(msg)
+    return mac
+
+
+class _ElementFunc:
+    """
+    A function-agnostic keyed hashing construction to avoid ambiguous encoding.
+    ElementMAC and ElementHash are built on top of ElementFunc, using different
+    function IDs to distinguish them.
+    """
+    inner_hash:     Any         # "Internal" hash object
+    outer_hash:     Any         # "External" hash object
+    item_count:     int         # Total number of inputs
+    hash_func:      Any         # Callable function to create hash object
     digest_size:    int         # Size of the hash output
     block_size:     int         # Block size for the hash
+    func_id:        int         # Function indicator
 
     def __init__(self,
+                 func_id: int,
                  key: bytes,
-                 msg: Optional[bytes]=None,
-                 digestmod: Optional[str]=None,
+                 msg: Optional[Any]=None,
+                 digestmod: Optional[Any]=None,
                  separator: Optional[bytes]=None):
         """
         Creates a new ElementMAC object using the selected hash algorithm and
@@ -131,16 +163,29 @@ class ElementMAC:
         """
         if digestmod is None:
             raise ValueError("Unspecified hash algorithm")
+        if func_id not in (FUNCTION_ID_HASH, FUNCTION_ID_MAC):
+            raise ValueError("Unsupported Element function")
 
-        self.finished = False
-        self.algo_name = digestmod
+        # We want to support three main interfaces:
+        #   - String indicators that can be used with `hashlib.new`
+        #   - Functions that return PEP 247-compliant hash objects
+        #   - PEP 247-compliant modules/classes that provide hash objects via `new`
+        if isinstance(digestmod, str):
+            hashfunc = lambda: hashlib.new(digestmod)
+        elif callable(digestmod):
+            hashfunc = lambda: digestmod()
+        elif hasattr(digestmod, "new") and callable(digestmod.new):
+            hashfunc = lambda: digestmod.new()
+        else:
+            raise ValueError("Invalid digestmod")
+
+        self.func_id = func_id
+        self.hash_func = hashfunc
         self.item_count = 0
-        self.hasher = hashlib.new(digestmod)
-        self.finalizer = hashlib.new(digestmod)
-        if self.hasher.block_size <= 24:
-            raise ValueError("Specified hash has invalid block size")
-        self.digest_size = self.hasher.digest_size
-        self.block_size = self.hasher.block_size
+        self.inner_hash = self.hash_func() #hashlib.new(digestmod)
+        self.outer_hash = self.hash_func() # hashlib.new(digestmod)
+        self.digest_size = self.inner_hash.digest_size
+        self.block_size = self.inner_hash.block_size
 
         self.__hash_init(key, separator)
 
@@ -152,47 +197,38 @@ class ElementMAC:
     def __hash_init(self, key: bytes, sep: Optional[bytes]):
         if sep is None:
             sep = b''
-        derived_key = derive_block(key, self.algo_name)
-        derived_sep = derive_block(sep, self.algo_name)
+        derived_key = derive_block(key, self.hash_func)
+        derived_sep = derive_block(sep, self.hash_func)
         key_len_bytes = encode_int_msbf(len(key))
         sep_len_bytes = encode_int_msbf(len(sep))
+        func_bytes = encode_int_msbf(self.func_id)
 
         # Initialize the inner hasher
-        inner_block: bytes = pad(INITIALIZER_INNER + key_len_bytes,
-                                 self.block_size)
-        self.hasher.update(inner_block)
-        self.hasher.update(derived_key)
+        inner_block: bytes = pad(INITIALIZER_INNER + func_bytes +
+                                 key_len_bytes, self.block_size)
+        self.inner_hash.update(inner_block)
+        self.inner_hash.update(derived_key)
 
         # Initialize the outer hasher
-        outer_block: bytes = pad(
-            INITIALIZER_OUTER + sep_len_bytes + key_len_bytes, self.block_size)
-        self.finalizer.update(outer_block)
-        self.finalizer.update(derived_sep)
-        self.finalizer.update(derived_key)
+        outer_block: bytes = pad(INITIALIZER_OUTER + func_bytes +
+                                 sep_len_bytes + key_len_bytes,
+                                 self.block_size)
+        self.outer_hash.update(outer_block)
+        self.outer_hash.update(derived_sep)
+        self.outer_hash.update(derived_key)
         return
 
 
-    def __finalize(self) -> None:
-        item_bytes: bytes = encode_int_msbf(self.item_count)
-        out_len_bytes: bytes = encode_int_msbf(self.digest_size)
-        self.finalizer.update(item_bytes)
-        self.finalizer.update(out_len_bytes)
-        self.finalizer.update(self.hasher.digest())
-        self.finished = True
-        return
-
-
-    def copy(self) -> "ElementMAC":
+    def copy(self) -> "_ElementFunc":
         """
         Creates a new ElementMAC object with the same internal state.
         """
-        new_hasher = ElementMAC(b'', None, self.algo_name)
+        new_hasher = _ElementFunc(self.func_id, b'', None, self.hash_func)
         new_hasher.item_count = self.item_count
-        new_hasher.finished = self.finished
-        new_hasher.hasher = self.hasher.copy()
-        new_hasher.finalizer = self.finalizer.copy()
+        new_hasher.inner_hash = self.inner_hash.copy()
+        new_hasher.outer_hash = self.outer_hash.copy()
         return new_hasher
-
+    
 
     def update(self, data: bytes):
         """
@@ -201,25 +237,24 @@ class ElementMAC:
         the underlying hash, so adding `b'\x00\x01\x02\x03'` is NOT the same as
         adding `b'\x00\x01'` and `b'\x02\x03'` in sequence.
         """
-        if self.finished:
-            raise RuntimeError("Cannot update  hash that has already completed")
         if self.item_count >= MAX_ITEMS:
             raise RuntimeError("Too many objects hashed")
 
         data_encoded: bytes = encode_data_little(data)
-        self.hasher.update(data_encoded)
+        self.inner_hash.update(data_encoded)
         self.item_count += 1
         return
 
 
     def digest(self) -> bytes:
-        """
-        Returns the final hash of the objects as a byte string
-        """
-        if not self.finished:
-            self.__finalize()
-
-        return self.finalizer.digest()
+        item_count_bytes: bytes = encode_int_msbf(self.item_count)
+        out_size_bytes: bytes = encode_int_msbf(self.digest_size)
+        inner_copy = self.inner_hash.copy()
+        outer_copy = self.outer_hash.copy()
+        outer_copy.update(item_count_bytes)
+        outer_copy.update(out_size_bytes)
+        outer_copy.update(inner_copy.digest())
+        return outer_copy.digest()
 
 
     def hexdigest(self) -> str:
@@ -228,33 +263,3 @@ class ElementMAC:
         """
         digest = self.digest()
         return digest.hex()
-
-
-class ElementHash:
-    """
-    A hash-agnostic MAC algorithm that avoids ambiguous encoding issues.
-    """
-    elementMAC: ElementMAC
-
-    def __init__(self, digestmod: str, sep: Optional[bytes]=None):
-        if sep is None:
-            sep = b''
-        self.elementMAC = ElementMAC(key=b'',
-                                     separator=sep, msg=None,
-                                     digestmod=digestmod)
-        return
-
-    def copy(self) -> "ElementHash":
-        new_mac = self.elementMAC.copy()
-        new_hash = ElementHash(self.elementMAC.algo_name)
-        new_hash.elementMAC = new_mac
-        return new_hash
-
-    def digest(self) -> bytes:
-        return self.elementMAC.digest()
-
-    def hexdigest(self) -> str:
-        return self.elementMAC.hexdigest()
-
-    def update(self, msg: bytes):
-        self.elementMAC.update(msg)
