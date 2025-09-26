@@ -62,6 +62,8 @@ def pad(data: bytes, b: int) -> bytes:
     the end of the string. If the length of the byte string is a multiple of
     `b`, the input and output are the same.
     """
+    if b < 1:
+        raise ValueError("Invalid padding length")
     blocks: int = max(1, (len(data) + b - 1) // b)
     padded_length: int = blocks * b
     pad_len = padded_length - len(data)
@@ -109,7 +111,10 @@ def newHash(
         data: Optional[bytes]=None,
         separator: Optional[bytes]=None) -> "_ElementFunc":
     """
-    Return a new ElementHash instance
+    Return a new ElementHash instance. This is equivalent to calling
+    `ElementHash.new` with the same arguments. Note that the returned object
+    is an instance of the `_ElementFunc` class, which implements 
+    `ElementHash` and `ElementMAC`.
     """
     hsh = _ElementFunc(func_id=FUNCTION_ID_HASH,
                        key=b'',
@@ -126,7 +131,10 @@ def newMAC(
         digestmod: Optional[str]=None,
         separator: Optional[bytes]=None) -> "_ElementFunc":
     """
-    Return a new ElementMAC instance
+    Return a new ElementMAC instance. This is equivalent to calling
+    `ElementMAC.new` with the same arguments. Note that the returned object
+    is an instance of the `_ElementFunc` class, which implements 
+    `ElementHash` and `ElementMAC`.
     """
     mac = _ElementFunc(digestmod=digestmod,
                        func_id=FUNCTION_ID_MAC,
@@ -158,7 +166,7 @@ class _ElementFunc:
                  digestmod: Optional[Any]=None,
                  separator: Optional[bytes]=None):
         """
-        Creates a new ElementMAC object using the selected hash algorithm and
+        Creates a new ElementFunc object using the selected hash algorithm and
         key
         """
         if digestmod is None:
@@ -182,8 +190,8 @@ class _ElementFunc:
         self.func_id = func_id
         self.hash_func = hashfunc
         self.item_count = 0
-        self.inner_hash = self.hash_func() #hashlib.new(digestmod)
-        self.outer_hash = self.hash_func() # hashlib.new(digestmod)
+        self.inner_hash = self.hash_func()
+        self.outer_hash = self.hash_func()
         self.digest_size = self.inner_hash.digest_size
         self.block_size = self.inner_hash.block_size
 
@@ -221,7 +229,7 @@ class _ElementFunc:
 
     def copy(self) -> "_ElementFunc":
         """
-        Creates a new ElementMAC object with the same internal state.
+        Creates a new _ElementFunc object with the same internal state.
         """
         new_hasher = _ElementFunc(self.func_id, b'', None, self.hash_func)
         new_hasher.item_count = self.item_count
@@ -230,12 +238,27 @@ class _ElementFunc:
         return new_hasher
     
 
-    def update(self, data: bytes):
+    def update(self, data: bytes, *args: bytes):
         """
-        Incorporates a new byte string into the MAC. Note that this an atomic
-        operation: each input is length-encoded before being integrated into
-        the underlying hash, so adding `b'\x00\x01\x02\x03'` is NOT the same as
-        adding `b'\x00\x01'` and `b'\x02\x03'` in sequence.
+        Incorporates a new byte string into the _ElementFunc. Note that this an
+        atomic operation: each input is length-encoded before being integrated
+        into the underlying hash, so adding `b'\x00\x01\x02\x03'` is NOT the
+        same as adding `b'\x00\x01'` and `b'\x02\x03'` in sequence.
+
+        Additional inputs can be specified as additional arguments; they will
+        be incorporated into the hash in order. That means that
+
+        ```
+            hasher.update(b'', b'abc', b'def')
+        ```
+
+        has the same effect as 
+
+        ```
+            hasher.update(b'')
+            hasher.update(b'abc')
+            hasher.update(b'def')
+        ```
         """
         if self.item_count >= MAX_ITEMS:
             raise RuntimeError("Too many objects hashed")
@@ -243,10 +266,17 @@ class _ElementFunc:
         data_encoded: bytes = encode_data_little(data)
         self.inner_hash.update(data_encoded)
         self.item_count += 1
+
+        # Handle additional elements
+        for x in args:
+            self.update(x)
         return
 
 
     def digest(self) -> bytes:
+        """"
+        Returns the final hash/MAC as a byte string.
+        """
         item_count_bytes: bytes = encode_int_msbf(self.item_count)
         out_size_bytes: bytes = encode_int_msbf(self.digest_size)
         inner_copy = self.inner_hash.copy()
@@ -259,7 +289,7 @@ class _ElementFunc:
 
     def hexdigest(self) -> str:
         """
-        Returns the final hash of the objects as a hex string
+        Returns the final hash/MAC as a hex string
         """
         digest = self.digest()
         return digest.hex()
