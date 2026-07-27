@@ -6,7 +6,7 @@ The goal is simple: keep programmers from accidentally feeding data into hash fu
 
 # How to Use It
 
-The APIs for `SequenceHash` and `SequenceMAC` strive to be drop-in replacements for the `hashlib` and `hmac` modules.
+The APIs for `SequenceHash` and `SequenceMAC` strive to be nearly drop-in replacements for the `hashlib` and `hmac` modules.
 
 To create a new `SequenceHash` object with `sha512` as the underlying hash function:
 

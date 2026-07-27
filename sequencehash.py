@@ -54,45 +54,40 @@ def encode_int_msbf(n: int) -> bytes:
     return n.to_bytes(MAX_LEN_BYTES, "big")
 
 
-def encode_bytestring(data: bytes) -> bytes:
+def get_pad_len(data: bytes, block_size: int) -> int:
     """
-    Encodes a byte string by prepending its length as a 128-bit integer
+    Returns the number of bytes needed to pad `data` out to a positive
+    multiple of `block_size`.
     """
-    encoded_len: bytes = encode_int_lsbf(len(data))
-    return encoded_len + data
+    blocks = (len(data) + block_size - 1) // block_size
+    blocks = max(blocks, 1)
+    return (blocks * block_size) - len(data)
 
 
-def pad(data: bytes, b: int) -> bytes:
+def get_padding(data: bytes, block_size: int) -> bytes:
     """
-    Returns a zero-padded copy of a byte string, padded out to the next
-    multiple of the block size `b`. At most, this adds `b - 1` zero bytes to
-    the end of the string. If the length of the byte string is a multiple of
-    `b`, the input and output are the same.
+    Returns a block of zero bytes `b` such that `len(data + b)` is a positive
+    multiple of `block_size`.
+    """
+    return b'\x00' * get_pad_len(data, block_size)
+
+
+def pad(data: bytes, block_size: int) -> bytes:
+    """
+    Returns a zero-padded copy of a byte string, padded out to a positive
+    multiple of `block_size`. At most, this adds `block_size - 1` zero bytes
+    to the end of the string. If the length of the byte string is a multiple of
+    `block_size`, the input and output are the same.
+
+    This function shouldn't be used for sensitive/secret values like keys. It
+    copies the input into a new value, creating unnecessary extra copies of
+    the sensitive information. The better pattern is to use `get_padding` in
+    conjunction with the sensitive information.
     """
     if b < 1:
         raise ValueError("Invalid padding length")
-    blocks: int = max(1, (len(data) + b - 1) // b)
-    padded_length: int = blocks * b
-    pad_len = padded_length - len(data)
-    padding = b"\x00" * pad_len
-    padded = data + padding
-    return padded
-
-
-def derive_block(value: bytes, algo: Any) -> bytes:
-    """
-    Processes a byte string according to the HMAC key derivation algorithm: if
-    the byte string is shorter than or equal to the block length of the given
-    hash algorithm, it is padded with zeroes to the block length. If it is
-    longer than the block length, it is hashed with the given algorithm, and
-    the result is zero-padded out to the block length of the hash algorithm.
-    """
-    hsh = algo()
-    if len(value) > hsh.block_size:
-        hsh.update(value)
-        value = hsh.digest()
-    value = pad(value, hsh.block_size)
-    return value
+    padding = get_padding(data, b)
+    return data + padding
 
 
 class SequenceMAC:
@@ -100,7 +95,7 @@ class SequenceMAC:
     def new(
         key: bytes,
         msg: Optional[Any] = None,
-        digestmod: Optional[str] = None,
+        digestmod: Optional[Any] = None,
         separator: Optional[bytes] = None,
     ) -> "_SequenceFunc":
         return newMAC(key, msg, digestmod, separator)
@@ -117,8 +112,8 @@ class SequenceHash:
 
 
 def newHash(
-    digestmod: Any, data: Optional[bytes] = None, separator: Optional[bytes] = None
-) -> "_SequenceFunc":
+    digestmod: Any, data: Optional[bytes] = None,
+    separator: Optional[bytes] = None) -> "_SequenceFunc":
     """
     Return a new SequenceHash instance. This is equivalent to calling
     `SequenceHash.new` with the same arguments. Note that the returned object
@@ -126,7 +121,10 @@ def newHash(
     `SequenceHash` and `SequenceMAC`.
     """
     hsh = _SequenceFunc(
-        func_id=FUNCTION_ID_HASH, key=b"", digestmod=digestmod, separator=separator
+        func_id=FUNCTION_ID_HASH,
+        key=b"",
+        digestmod=digestmod,
+        separator=separator
     )
     if data is not None:
         hsh.update(data)
@@ -146,7 +144,10 @@ def newMAC(
     `SequenceHash` and `SequenceMAC`.
     """
     mac = _SequenceFunc(
-        digestmod=digestmod, func_id=FUNCTION_ID_MAC, key=key, separator=separator
+        digestmod=digestmod,
+        func_id=FUNCTION_ID_MAC,
+        key=key,
+        separator=separator
     )
     if msg is not None:
         mac.update(msg)
@@ -156,8 +157,8 @@ def newMAC(
 class _SequenceFunc:
     """
     A function-agnostic keyed hashing construction to avoid ambiguous encoding.
-    SequenceMAC and SequenceHash are built on top of SequenceFunc, using different
-    function IDs to distinguish them.
+    SequenceMAC and SequenceHash are built on top of SequenceFunc, using
+    different function IDs to distinguish them.
     """
 
     inner_hash: Any  # "Internal" hash object
@@ -174,8 +175,7 @@ class _SequenceFunc:
         key: bytes,
         msg: Optional[Any] = None,
         digestmod: Optional[Any] = None,
-        separator: Optional[bytes] = None,
-    ):
+        separator: Optional[bytes] = None):
         """
         Creates a new SequenceFunc object using the selected hash algorithm and
         key
@@ -213,6 +213,10 @@ class _SequenceFunc:
         return
 
     def __hash_init(self, key: bytes, sep: Optional[bytes]):
+        """
+        Initializes the inner and outer hash objects, including headers, keys,
+        and customization string.
+        """
         if sep is None:
             sep = b""
 
@@ -220,50 +224,73 @@ class _SequenceFunc:
         if self.func_id == FUNCTION_ID_MAC and len(key) < MIN_KEY_LENGTH:
             raise ValueError("Key length too short")
 
-        # As with HMAC, it is suggested that the key size and the output size of the hash match.
-        # Implementations MAY issue warnings when there's a mismatch, and this implementation
-        # chooses to do so.
-        if len(key) != self.digest_size:
+        # As with HMAC, it is suggested that the key size and the output size
+        # of the hash match. Implementations MAY issue warnings when there's a
+        # mismatch, and this implementation chooses to do so.
+        if self.func_id == FUNCTION_ID_MAC and len(key) != self.digest_size:
             warnings.warn(
-                f"Key length of {len(key)} doesn't match digest_size of {self.digest_size}"
+                "Key length of %i doesn't match digest_size of %i" %
+                (len(key), self.digest_size)
             )
 
-        # Implementations MAY choose to emit warnings when a short hash or known-insecure hash is
-        # used. Implementations MAY choose to prohibit the use of short hashes or known-insecure
-        # hashes, but MUST explicitly document which hashes are prohibited. Rather than prohibit
-        # the use of short hashes or known-insecure hashes, this implementation emits a warning.
+        # Implementations MAY choose to emit warnings when a short hash or
+        # known-insecure hash is used. Implementations MAY choose to prohibit
+        # the use of short hashes or known-insecure hashes, but MUST explicitly
+        # document which hashes are prohibited. Rather than prohibit the use of
+        # short hashes or known-insecure hashes, this implementation emits a
+        # warning.
         hash_func = self.hash_func()
         if self.digest_size < SHORT_HASH_CUTOFF:
-            warnings.warn(
-                f'Hash function "{hash_func.name}" has short output ({self.digest_size} bytes)'
-            )
+            warnings.warn(f'Hash function "{hash_func.name}" has short output')
 
         if hash_func.name in INSECURE_HASHES:
             warnings.warn(
-                f'Hash function "{hash_func.name}" has known security problems'
-            )
+                f'Hash function "{hash_func.name}" has known security issues')
 
-        derived_key = derive_block(key, self.hash_func)
-        derived_sep = derive_block(sep, self.hash_func)
-        key_len_bytes = encode_int_msbf(len(key))
-        sep_len_bytes = encode_int_msbf(len(sep))
-        func_bytes = encode_int_msbf(self.func_id)
+        # Reduce the separator/customizer if needed
+        if len(sep) > self.block_size:
+            sep = sehf.hash_func.new(sep).digest()
+        sep_padding = get_padding(sep, self.block_size)
 
-        # Initialize the inner hasher
+        # Reduce the key if needed
+        if len(key) > self.block_size:
+            key = self.hash_func.new(key).digest()
+        key_padding = get_padding(key, self.block_size)
+
+        # INNER INITIALIZATION
+
+        # Feed the inner key into the inner hash
+        self.inner_hash.update(bytes(key[0] ^ 0x55))
+        self.inner_hash.update(key[1:])
+        self.inner_hash.key_padding(key_padding)
+
+        # Feed the inner header into the inner hash
         inner_block: bytes = pad(
             INITIALIZER_INNER + func_bytes + key_len_bytes, self.block_size
         )
         self.inner_hash.update(inner_block)
-        self.inner_hash.update(derived_key)
 
-        # Initialize the outer hasher
+        # OUTER INITIALIZATION
+
+        # Feed the outer key into the outer hash
+        self.outer_hash.update(bytes(key[0] ^ 0xaa))
+        self.outer_hash.update(key[1:])
+        self.outer_hash.key_padding(key_padding)
+
+        # Feed the outer header into the outer hash
+        key_len_bytes = encode_int_msbf(len(key))
+        sep_len_bytes = encode_int_msbf(len(sep))
+        func_bytes = encode_int_msbf(self.func_id)
+
         outer_block: bytes = pad(
             INITIALIZER_OUTER + func_bytes + sep_len_bytes + key_len_bytes,
             self.block_size,
         )
         self.outer_hash.update(outer_block)
-        self.outer_hash.update(derived_sep)
-        self.outer_hash.update(derived_key)
+
+        # Feed the separator/customization string into the outer hash
+        self.outer_hash.update(sep)
+        self.outer_hash.update(sep_padding)
         return
 
     def copy(self) -> "_SequenceFunc":
@@ -278,10 +305,10 @@ class _SequenceFunc:
 
     def update(self, data: bytes, *args: bytes):
         """
-        Incorporates a new byte string into the _SequenceFunc. Note that this an
-        atomic operation: each input is length-encoded before being integrated
-        into the underlying hash, so adding `b'\x00\x01\x02\x03'` is NOT the
-        same as adding `b'\x00\x01'` and `b'\x02\x03'` in sequence.
+        Incorporates a new byte string into the _SequenceFunc. Note that this
+        an atomic operation: each input is length-encoded before being
+        integrated into the underlying hash, so adding `b'\x00\x01\x02\x03'`
+        is NOT the same as adding `b'\x00\x01'` and `b'\x02\x03'` in sequence.
 
         Additional inputs can be specified as additional arguments; they will
         be incorporated into the hash in order. That means that
@@ -300,9 +327,8 @@ class _SequenceFunc:
         """
         if self.item_count >= MAX_ITEMS:
             raise RuntimeError("Too many objects hashed")
-
-        data_encoded: bytes = encode_bytestring(data)
-        self.inner_hash.update(data_encoded)
+        self.inner_hash.update(data)
+        self.inner_hash.update(encode_int_lsbf(len(data)))
         self.item_count += 1
 
         # Handle additional inputs
