@@ -84,9 +84,9 @@ def pad(data: bytes, block_size: int) -> bytes:
     the sensitive information. The better pattern is to use `get_padding` in
     conjunction with the sensitive information.
     """
-    if b < 1:
+    if block_size < 1:
         raise ValueError("Invalid padding length")
-    padding = get_padding(data, b)
+    padding = get_padding(data, block_size)
     return data + padding
 
 
@@ -247,10 +247,23 @@ class _SequenceFunc:
             warnings.warn(
                 f'Hash function "{hash_func.name}" has known security issues')
 
+        # Encode our function identifier, key length, and separator length
+        func_bytes = encode_int_msbf(self.func_id)
+        key_len_bytes = encode_int_msbf(len(key))
+        sep_len_bytes = encode_int_msbf(len(sep))
+
         # Reduce the separator/customizer if needed
         if len(sep) > self.block_size:
-            sep = sehf.hash_func.new(sep).digest()
+            sep = self.hash_func.new(sep).digest()
         sep_padding = get_padding(sep, self.block_size)
+
+        # In the specific case of SequenceHash, where the key is empty, we
+        # just replace the key with a full block of zero bytes; the key length
+        # has already been encoded above. This means we don't run into issues
+        # with modifying the first later on with the "tweaks", and it means we
+        # have a zero-length pad.
+        if self.func_id == FUNCTION_ID_HASH:
+            key = pad(b'', self.block_size)
 
         # Reduce the key if needed
         if len(key) > self.block_size:
@@ -260,9 +273,9 @@ class _SequenceFunc:
         # INNER INITIALIZATION
 
         # Feed the inner key into the inner hash
-        self.inner_hash.update(bytes(key[0] ^ 0x55))
+        self.inner_hash.update(bytes([key[0] ^ 0x55]))
         self.inner_hash.update(key[1:])
-        self.inner_hash.key_padding(key_padding)
+        self.inner_hash.update(key_padding)
 
         # Feed the inner header into the inner hash
         inner_block: bytes = pad(
@@ -273,15 +286,11 @@ class _SequenceFunc:
         # OUTER INITIALIZATION
 
         # Feed the outer key into the outer hash
-        self.outer_hash.update(bytes(key[0] ^ 0xaa))
+        self.outer_hash.update(bytes([key[0] ^ 0xaa]))
         self.outer_hash.update(key[1:])
-        self.outer_hash.key_padding(key_padding)
+        self.outer_hash.update(key_padding)
 
         # Feed the outer header into the outer hash
-        key_len_bytes = encode_int_msbf(len(key))
-        sep_len_bytes = encode_int_msbf(len(sep))
-        func_bytes = encode_int_msbf(self.func_id)
-
         outer_block: bytes = pad(
             INITIALIZER_OUTER + func_bytes + sep_len_bytes + key_len_bytes,
             self.block_size,
