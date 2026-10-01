@@ -94,11 +94,10 @@ class SequenceMAC:
     @staticmethod
     def new(
         key: bytes,
+        digestmod: Any,
         msg: Optional[Any] = None,
-        digestmod: Optional[Any] = None,
-        separator: Optional[bytes] = None,
     ) -> "_SequenceFunc":
-        return newMAC(key, msg, digestmod, separator)
+        return newMAC(key, msg, digestmod)
 
 
 class SequenceHash:
@@ -106,14 +105,12 @@ class SequenceHash:
     def new(
         digestmod: Optional[Any] = None,
         data: Optional[bytes] = None,
-        separator: Optional[bytes] = None,
     ) -> "_SequenceFunc":
-        return newHash(digestmod, data, separator)
+        return newHash(digestmod, data)
 
 
 def newHash(
-    digestmod: Any, data: Optional[bytes] = None,
-    separator: Optional[bytes] = None) -> "_SequenceFunc":
+    digestmod: Any, data: Optional[bytes] = None) -> "_SequenceFunc":
     """
     Return a new SequenceHash instance. This is equivalent to calling
     `SequenceHash.new` with the same arguments. Note that the returned object
@@ -124,19 +121,16 @@ def newHash(
         func_id=FUNCTION_ID_HASH,
         key=b"",
         digestmod=digestmod,
-        separator=separator
     )
     if data is not None:
-        hsh.update(data)
+        hsh.add(data)
     return hsh
 
 
 def newMAC(
     key: bytes,
     msg: Optional[bytes] = None,
-    digestmod: Optional[str] = None,
-    separator: Optional[bytes] = None,
-) -> "_SequenceFunc":
+    digestmod: Optional[Any]=None) -> "_SequenceFunc":
     """
     Return a new SequenceMAC instance. This is equivalent to calling
     `SequenceMAC.new` with the same arguments. Note that the returned object
@@ -144,13 +138,12 @@ def newMAC(
     `SequenceHash` and `SequenceMAC`.
     """
     mac = _SequenceFunc(
-        digestmod=digestmod,
         func_id=FUNCTION_ID_MAC,
         key=key,
-        separator=separator
+        digestmod=digestmod,
     )
     if msg is not None:
-        mac.update(msg)
+        mac.add(msg)
     return mac
 
 
@@ -163,10 +156,13 @@ class _SequenceFunc:
 
     inner_hash: Any  # "Internal" hash object
     outer_hash: Any  # "External" hash object
+    inner_init: Any  # "Internal" hash object
+    outer_init: Any  # "External" hash object
     item_count: int  # Total number of inputs
     hash_func: Any  # Callable function to create hash object
     digest_size: int  # Size of the hash output
     block_size: int  # Block size for the hash
+    key_len: int  # Key length (in bytes)
     func_id: int  # Function indicator
 
     def __init__(
@@ -174,8 +170,7 @@ class _SequenceFunc:
         func_id: int,
         key: bytes,
         msg: Optional[Any] = None,
-        digestmod: Optional[Any] = None,
-        separator: Optional[bytes] = None):
+        digestmod: Optional[Any] = None):
         """
         Creates a new SequenceFunc object using the selected hash algorithm and
         key
@@ -205,21 +200,18 @@ class _SequenceFunc:
         self.outer_hash = self.hash_func()
         self.digest_size = self.inner_hash.digest_size
         self.block_size = self.inner_hash.block_size
+        self.key_len = len(key)
 
-        self.__hash_init(key, separator)
+        self.__hash_init(key)
 
         if msg is not None:
-            self.update(msg)
+            self.add(msg)
         return
 
-    def __hash_init(self, key: bytes, sep: Optional[bytes]):
+    def __hash_init(self, key: bytes):
         """
-        Initializes the inner and outer hash objects, including headers, keys,
-        and customization string.
+        Initializes the inner and outer hash objects.
         """
-        if sep is None:
-            sep = b""
-
         # SequenceMAC enforces a minimum 32-byte key length
         if self.func_id == FUNCTION_ID_MAC and len(key) < MIN_KEY_LENGTH:
             raise ValueError("Key length too short")
@@ -250,12 +242,6 @@ class _SequenceFunc:
         # Encode our function identifier, key length, and separator length
         func_bytes = encode_int_msbf(self.func_id)
         key_len_bytes = encode_int_msbf(len(key))
-        sep_len_bytes = encode_int_msbf(len(sep))
-
-        # Reduce the separator/customizer if needed
-        if len(sep) > self.block_size:
-            sep = self.hash_func.new(sep).digest()
-        sep_padding = get_padding(sep, self.block_size)
 
         # In the specific case of SequenceHash, where the key is empty, we
         # just replace the key with a full block of zero bytes; the key length
@@ -267,11 +253,12 @@ class _SequenceFunc:
 
         # Reduce the key if needed
         if len(key) > self.block_size:
-            key = self.hash_func.new(key).digest()
+            hasher = self.hash_func()
+            hasher.update(key)
+            key = hasher.digest()
         key_padding = get_padding(key, self.block_size)
 
         # INNER INITIALIZATION
-
         # Feed the inner key into the inner hash
         self.inner_hash.update(bytes([key[0] ^ 0x55]))
         self.inner_hash.update(key[1:])
@@ -284,35 +271,30 @@ class _SequenceFunc:
         self.inner_hash.update(inner_block)
 
         # OUTER INITIALIZATION
-
         # Feed the outer key into the outer hash
         self.outer_hash.update(bytes([key[0] ^ 0xaa]))
         self.outer_hash.update(key[1:])
         self.outer_hash.update(key_padding)
 
-        # Feed the outer header into the outer hash
-        outer_block: bytes = pad(
-            INITIALIZER_OUTER + func_bytes + sep_len_bytes + key_len_bytes,
-            self.block_size,
-        )
-        self.outer_hash.update(outer_block)
-
-        # Feed the separator/customization string into the outer hash
-        self.outer_hash.update(sep)
-        self.outer_hash.update(sep_padding)
+        # Make copies of our initialized hashes
+        self.inner_init = self.inner_hash.copy()
+        self.outer_init = self.outer_hash.copy()
         return
 
     def copy(self) -> "_SequenceFunc":
         """
         Creates a new _SequenceFunc object with the same internal state.
         """
-        new_hasher = _SequenceFunc(self.func_id, b"", None, self.hash_func)
+        new_hasher = _SequenceFunc(self.func_id, b"\x00" * self.digest_size, None, self.hash_func)
         new_hasher.item_count = self.item_count
         new_hasher.inner_hash = self.inner_hash.copy()
         new_hasher.outer_hash = self.outer_hash.copy()
+        new_hasher.inner_init = self.inner_init.copy()
+        new_hasher.outer_init = self.outer_init.copy()
+        new_hasher.key_len = self.key_len
         return new_hasher
 
-    def update(self, data: bytes, *args: bytes):
+    def add(self, data: bytes, *args: bytes):
         """
         Incorporates a new byte string into the _SequenceFunc. Note that this
         an atomic operation: each input is length-encoded before being
@@ -323,15 +305,15 @@ class _SequenceFunc:
         be incorporated into the hash in order. That means that
 
         ```
-            hasher.update(b'', b'abc', b'def')
+            hasher.add(b'', b'abc', b'def')
         ```
 
         has the same effect as
 
         ```
-            hasher.update(b'')
-            hasher.update(b'abc')
-            hasher.update(b'def')
+            hasher.add(b'')
+            hasher.add(b'abc')
+            hasher.add(b'def')
         ```
         """
         if self.item_count >= MAX_ITEMS:
@@ -342,25 +324,62 @@ class _SequenceFunc:
 
         # Handle additional inputs
         for x in args:
-            self.update(x)
+            self.add(x)
         return
 
-    def digest(self) -> bytes:
+    def result_with_customizer(self, customizer: bytes) -> bytes:
+        """
+        Returns the final hash/MAC as a byte string, using the given customizer
+        """
+        # Copy our hash objects to prevent accidental state overwrite
+        inner_copy = self.inner_hash.copy()
+        outer_copy = self.outer_hash.copy()
+
+        # Get our encoded integer information for the outer hash
+        item_count_bytes: bytes = encode_int_msbf(self.item_count)
+        func_bytes: bytes = encode_int_msbf(self.func_id)
+        out_size_bytes: bytes = encode_int_msbf(self.digest_size)
+        key_len_bytes: bytes = encode_int_msbf(self.key_len)
+        cust_len_bytes: bytes = encode_int_msbf(len(customizer))
+
+        # Get the inner hash
+        inner_hash = inner_copy.digest()
+
+        # Compute the customizer block
+        if len(customizer) > self.block_size:
+            hasher = self.hash_func()
+            hasher.update(customizer)
+            customizer = hasher.digest()
+        customizer = pad(customizer, self.block_size)
+
+        # Compute the outer header block
+        outer_header: bytes = pad(
+            INITIALIZER_OUTER + func_bytes + cust_len_bytes + key_len_bytes,
+            self.block_size,
+        )
+
+        # Update the outer hash with the header and customizer blocks
+        outer_copy.update(outer_header)
+        outer_copy.update(customizer)
+
+        # Update the outer hash with the count and length
+        outer_copy.update(item_count_bytes)
+        outer_copy.update(out_size_bytes)
+
+        # Finally, process the inner hash
+        outer_copy.update(inner_hash)
+        return outer_copy.digest()
+
+    def result(self, customizer: Optional[bytes]=None) -> bytes:
         """
         Returns the final hash/MAC as a byte string.
         """
-        item_count_bytes: bytes = encode_int_msbf(self.item_count)
-        out_size_bytes: bytes = encode_int_msbf(self.digest_size)
-        inner_copy = self.inner_hash.copy()
-        outer_copy = self.outer_hash.copy()
-        outer_copy.update(item_count_bytes)
-        outer_copy.update(out_size_bytes)
-        outer_copy.update(inner_copy.digest())
-        return outer_copy.digest()
+        if customizer is None:
+            customizer = b''
+        return self.result_with_customizer(customizer)
 
-    def hexdigest(self) -> str:
-        """
-        Returns the final hash/MAC as a hex string
-        """
-        digest = self.digest()
-        return digest.hex()
+    def reset(self):
+        self.item_count = 0
+        self.inner_hash = self.inner_init.copy()
+        self.outer_hash = self.outer_init.copy()
+        return
