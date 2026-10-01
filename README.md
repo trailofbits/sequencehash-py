@@ -21,13 +21,29 @@ my_key = b'\x00' * 32
 hasher = sequencehash.SequenceMAC.new(mykey, digestmod='sha512')
 ```
 
-`SequenceHash` and `SequenceMAC` also have the advantage of including domain separators. If you need to use the hash or MAC of a value in multiple contexts, you can simply provide a different `separator` argument for each:
+To incorporate a new value into the hash, simply use the `add` method:
 
 ```py
-hasher1 = sequencehash.SequenceHash.new(digestmod='sha512', separator=b'FUNCTION_ONE')
-hasher2 = sequencehash.SequenceHash.new(digestmod='sha512', separator=b'FUNCTION_TWO')
-mac1 = sequencehash.SequenceMAC.new(digestmod='sha512', key=b'\x00' * 64, separator=b'FUNCTION_ONE')
-mac2 = sequencehash.SequenceMAC.new(digestmod='sha512', key=b'\x00' * 64, separator=b'FUNCTION_TWO')
+my_key = b'\x00' * 32
+hasher = sequencehash.SequenceMAC.new(mykey, digestmod='sha512')
+hasher.add(b'Test')
 ```
 
-Once you've created your hashing and MAC objects, they act just like any other hash or MAC object, with the exception that each input will be a separate, encoded value. That means that updating an `SequenceHash` object with `ab`, then `cd` will NOT give you the same result as updating it `abcd` or `a` and `bcd`.
+You can call `add` an arbitrary number of times (up to `2 ** 128 - 1` times, technically). When you're done, simply call `result` for an uncustomized hash or MAC:
+
+
+```py
+my_key = b'\x00' * 32
+hasher = sequencehash.SequenceMAC.new(mykey, digestmod='sha512')
+hasher.add(b'Test')
+print(hasher.result().hex())
+```
+
+If you wish to incorporate a customization string (for instance, to prevent cross-domain replay in a protocol), you can simply call `result_with_customizer`:
+
+```py
+my_key = b'\x00' * 32
+hasher = sequencehash.SequenceMAC.new(mykey, digestmod='sha512')
+hasher.add(b'Test')
+print(hasher.result_with_customizer(b'PROTOCOL_ROUND_000').hex())
+```
