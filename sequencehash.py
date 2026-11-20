@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import copy
 import hashlib
 import warnings
 from typing import Any, List, Optional
@@ -285,13 +286,16 @@ class _SequenceFunc:
         """
         Creates a new _SequenceFunc object with the same internal state.
         """
-        new_hasher = _SequenceFunc(self.func_id, b"\x00" * self.digest_size, None, self.hash_func)
-        new_hasher.item_count = self.item_count
+        # Don't call the constructor: it would run key setup again with a
+        # placeholder key, which fails the minimum key length check for short
+        # hashes and repeats the constructor's warnings. A shallow copy keeps
+        # the counters and settings; the hash objects must be copied so the
+        # two objects don't share state.
+        new_hasher = copy.copy(self)
         new_hasher.inner_hash = self.inner_hash.copy()
         new_hasher.outer_hash = self.outer_hash.copy()
         new_hasher.inner_init = self.inner_init.copy()
         new_hasher.outer_init = self.outer_init.copy()
-        new_hasher.key_len = self.key_len
         return new_hasher
 
     def add(self, data: bytes, *args: bytes):
