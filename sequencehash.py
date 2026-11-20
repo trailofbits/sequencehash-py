@@ -251,6 +251,19 @@ class _SequenceFunc:
         if self.func_id == FUNCTION_ID_HASH:
             key = pad(b'', self.block_size)
 
+        # The specification says implementations "SHOULD zeroize K, K_I, and
+        # K_O when no longer needed for computations", and asks for deviations
+        # from a SHOULD to be documented. Python can't do this reliably: bytes
+        # are immutable, and the runtime copies and frees memory without
+        # wiping it. As a best effort, K_I and K_O are never built: the tweaked
+        # first byte, the rest of the key and the padding are fed to the hash
+        # objects separately, and the rest of the key is read through a
+        # memoryview so that no copy of it is made. What is not wiped:
+        #   - the caller's key, which belongs to the caller;
+        #   - the hash of a key longer than the block size (an immutable bytes
+        #     object, freed but not wiped);
+        #   - the keyed hash states held by this object and its copies.
+
         # Reduce the key if needed
         if len(key) > self.block_size:
             hasher = self.hash_func()
@@ -261,7 +274,7 @@ class _SequenceFunc:
         # INNER INITIALIZATION
         # Feed the inner key into the inner hash
         self.inner_hash.update(bytes([key[0] ^ 0x55]))
-        self.inner_hash.update(key[1:])
+        self.inner_hash.update(memoryview(key)[1:])
         self.inner_hash.update(key_padding)
 
         # Feed the inner header into the inner hash
@@ -273,7 +286,7 @@ class _SequenceFunc:
         # OUTER INITIALIZATION
         # Feed the outer key into the outer hash
         self.outer_hash.update(bytes([key[0] ^ 0xaa]))
-        self.outer_hash.update(key[1:])
+        self.outer_hash.update(memoryview(key)[1:])
         self.outer_hash.update(key_padding)
 
         # Make copies of our initialized hashes
