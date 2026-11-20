@@ -28,6 +28,14 @@ INSECURE_HASHES: List[str] = ["sha1", "md4", "md5"]
 SHORT_HASH_CUTOFF: int = 32
 
 
+class WeakHashWarning(UserWarning):
+    """
+    Emitted when a short hash (output under 32 bytes) or a hash with known
+    security issues is used. Filter this category with the `warnings` module
+    to opt in to such a hash; see "Short and insecure hashes" in README.md.
+    """
+
+
 def encode_int_lsbf(n: int) -> bytes:
     """
     Encodes a non-negative integer to bytes, least significant byte first. The
@@ -218,26 +226,38 @@ class _SequenceFunc:
 
         # As with HMAC, it is suggested that the key size and the output size
         # of the hash match. Implementations MAY issue warnings when there's a
-        # mismatch, and this implementation chooses to do so.
-        if self.func_id == FUNCTION_ID_MAC and len(key) != self.digest_size:
+        # mismatch, and this implementation chooses to do so. The spec makes
+        # that recommendation only for hashes with at least 32 bytes of
+        # output: a short hash can't match, since keys must be at least 32
+        # bytes, and the WeakHashWarning below already covers it.
+        if (self.func_id == FUNCTION_ID_MAC
+                and self.digest_size >= SHORT_HASH_CUTOFF
+                and len(key) != self.digest_size):
             warnings.warn(
                 "Key length of %i doesn't match digest_size of %i" %
                 (len(key), self.digest_size)
             )
 
-        # Implementations MAY choose to emit warnings when a short hash or
-        # known-insecure hash is used. Implementations MAY choose to prohibit
-        # the use of short hashes or known-insecure hashes, but MUST explicitly
-        # document which hashes are prohibited. Rather than prohibit the use of
-        # short hashes or known-insecure hashes, this implementation emits a
-        # warning.
+        # The specification says implementations SHOULD emit warnings when
+        # SequenceMAC is used with a short hash (output under 32 bytes),
+        # because MAC security is then bounded by the output length regardless
+        # of key length. For SequenceHash, warnings are optional (MAY).
+        # Implementations MAY instead prohibit short hashes or hashes with
+        # known security issues, but MUST document which ones they prohibit,
+        # and implementations that allow short hashes SHOULD document the
+        # risks. This implementation allows them, documents the risks in
+        # README.md, and emits a WeakHashWarning for both SequenceMAC and
+        # SequenceHash. Callers that accept the risk can filter that category.
         hash_func = self.hash_func()
         if self.digest_size < SHORT_HASH_CUTOFF:
-            warnings.warn(f'Hash function "{hash_func.name}" has short output')
+            warnings.warn(
+                f'Hash function "{hash_func.name}" has short output',
+                WeakHashWarning)
 
         if hash_func.name in INSECURE_HASHES:
             warnings.warn(
-                f'Hash function "{hash_func.name}" has known security issues')
+                f'Hash function "{hash_func.name}" has known security issues',
+                WeakHashWarning)
 
         # Encode our function identifier, key length, and separator length
         func_bytes = encode_int_msbf(self.func_id)

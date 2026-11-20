@@ -4,6 +4,23 @@ This library provides the `SequenceHash` and `SequenceMAC` constructions, which 
 
 The goal is simple: keep programmers from accidentally feeding data into hash functions in an ambiguous (and therefore dangerous) way.
 
+## Short and insecure hashes
+
+SequenceHash and SequenceMAC are only as secure as the underlying hash function. A "short hash" has less than 32 bytes of output (for example SHA-1, MD5, SHA-224 or SHA3-224). With a short hash, SequenceHash gives less than 128-bit collision resistance, and SequenceMAC's security is bounded by the output length no matter how long the key is. MD4, MD5 and SHA-1 also have known cryptanalytic attacks. Prefer a hash with at least 32 bytes of output, such as SHA-256 or SHA-512.
+
+The [specification](https://c2sp.org/sequencehash) lets implementations either warn about or reject short hashes. This library allows them and emits a `sequencehash.WeakHashWarning` (a `UserWarning`) when one is used. If you need a short hash, for example to interoperate with an existing system, filter that warning:
+
+```py
+import os
+import warnings
+
+import sequencehash
+
+with warnings.catch_warnings():
+    warnings.simplefilter('ignore', sequencehash.WeakHashWarning)
+    hasher = sequencehash.SequenceMAC.new(os.urandom(32), digestmod='sha1')
+```
+
 # How to Use It
 
 The APIs for `SequenceHash` and `SequenceMAC` strive to be nearly drop-in replacements for the `hashlib` and `hmac` modules.
